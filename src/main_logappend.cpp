@@ -6,19 +6,19 @@
 
 class LogEntry {
 private:
-    long timestamp;    // Time since IITGN opened
-    std::string token; // Authentication token
-    std::string name;  // Name of employee or guest
-    std::string role;  // Employee or guest
-    bool arrival;      // Arrival or departure
-    int room;          // Room number, -1 if not specified
+    long timestamp;    
+    std::string token;
+    std::string name; 
+    std::string role;
+    bool arrival;      
+    int room;         
 
 public:
-    // Constructor to create a log entry
+    
     LogEntry(long t, std::string tok, std::string n, std::string r, bool a, int rm = -1) 
         : timestamp(t), token(tok), name(n), role(r), arrival(a), room(rm) {}
 
-    // Serialize the log entry to a string for writing to file
+    
     std::string serialize() const {
         char buffer[100];
         sprintf(buffer, "%ld %s %s %s %s %d\n", 
@@ -27,36 +27,36 @@ public:
         return std::string(buffer);
     }
 
-    // Getter methods for validation
+    
     long getTimestamp() const { return timestamp; }
     std::string getToken() const { return token; }
 };
 
-// LogManager class to handle appending entries to the log file
+
 class LogManager {
 private:
     std::string logFile;
     std::string validToken;
     long lastTimestamp;
 
-    // Helper function to check if a file exists
+   
     bool fileExists(const char *filename) {
         std::ifstream infile(filename);
         return infile.good();
     }
 
 public:
-    // Constructor to initialize log manager with a log file
+   
     LogManager(std::string file) : logFile(file), lastTimestamp(0) {
         if (fileExists(logFile.c_str())) {
-            // If log file exists, read the last timestamp and token
+            
             std::ifstream infile(logFile.c_str());
             infile >> lastTimestamp >> validToken;
             infile.close();
         } else {
-            // Create the log file if it does not exist
+           
             std::ofstream outfile(logFile.c_str(), std::ios::app);
-            outfile.close(); // Create the file and close immediately
+            outfile.close(); 
         }
     }
 
@@ -81,19 +81,19 @@ public:
 
     // Function to validate entry before appending
     bool validate(LogEntry &entry) {
-        // Check if the timestamp is valid
+       
         if (entry.getTimestamp() <= lastTimestamp) {
             std::cout << "invalid" << std::endl;
             return false;
         }
 
-        // Check if the token matches (if the log exists)
+        
         if (!validToken.empty() && validToken != entry.getToken()) {
             std::cout << "invalid" << std::endl;
             return false;
         }
 
-        // Additional checks (e.g., room logic, entry consistency) can go here
+        
 
         return true;
     }
@@ -123,7 +123,7 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "-L") == 0) {
             arrival = false;
         } else {
-            logFile = argv[i]; // Assume the last argument is the log file name
+            logFile = argv[i]; 
         }
     }
 
@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Create a LogEntry and LogManager, then append entry to log
+   
     LogEntry entry(timestamp, token, name, role, arrival, room);
     LogManager manager(logFile);
     if (!manager.appendEntry(entry)) {
