@@ -1,144 +1,360 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <map>
 #include <cstring>
-#include <ctime>
 #include <cstdlib>
+#include <cctype>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 
-class LogEntry {
-private:
-    long timestamp;    
+const int MAX_TIMESTAMP = 1073741823;
+const int MAX_ROOM_ID = 1073741823;
+
+struct Event {
+    long timestamp;
     std::string token;
-    std::string name; 
-    std::string role;
-    bool arrival;      
-    int room;         
+    std::string name;
+    bool isEmployee;
+    bool isArrival;
+    int roomId;
 
-public:
-    
-    LogEntry(long t, std::string tok, std::string n, std::string r, bool a, int rm = -1) 
-        : timestamp(t), token(tok), name(n), role(r), arrival(a), room(rm) {}
-
-    
-    std::string serialize() const {
-        char buffer[100];
-        sprintf(buffer, "%ld %s %s %s %s %d\n", 
-            timestamp, token.c_str(), role.c_str(), name.c_str(), 
-            arrival ? "ARRIVED" : "LEFT", room);
-        return std::string(buffer);
-    }
-
-    
-    long getTimestamp() const { return timestamp; }
-    std::string getToken() const { return token; }
+    Event(long t, const std::string& tok, const std::string& n, bool emp, bool arr, int room = -1)
+        : timestamp(t), token(tok), name(n), isEmployee(emp), isArrival(arr), roomId(room) {}
 };
-
-
-class LogManager {
+class SecureLogManager {
 private:
     std::string logFile;
+    std::string token;
+    std::vector<Event> events;
+    std::map<std::string, bool> inCampus;
+    std::map<std::string, int> currentRoom;
     std::string validToken;
-    long lastTimestamp;
 
-   
-    bool fileExists(const char *filename) {
-        std::ifstream infile(filename);
-        return infile.good();
+    // New members for encryption
+    unsigned char key[32];  // 256-bit key
+    unsigned char salt[16];
+    unsigned char iv[12];   // IV for AES-GCM
+
+    void deriveKey() {
+            PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, sizeof(salt), 100, EVP_sha256(), sizeof(key), key);
     }
 
-public:
-   
-    LogManager(std::string file) : logFile(file), lastTimestamp(0) {
-        if (fileExists(logFile.c_str())) {
-            
-            std::ifstream infile(logFile.c_str());
-            infile >> lastTimestamp >> validToken;
-            infile.close();
+    bool encryptAndWriteLog() {
+        std::string plaintext;
+        for (const auto& event : events) {
+            plaintext += std::to_string(event.timestamp) + " " + event.token + " " + event.name + " " +
+                         std::to_string(event.isEmployee) + " " + std::to_string(event.isArrival) + " " +
+                         std::to_string(event.roomId) + "\n";
+        }
+
+        // Generate a new IV for each write
+        RAND_bytes(iv, sizeof(iv));
+
+        // Set up the encryption context
+        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv);
+
+        // Encrypt the plaintext
+        std::vector<unsigned char> ciphertext(plaintext.length() + EVP_MAX_BLOCK_LENGTH);
+        int len;
+        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, reinterpret_cast<const unsigned char*>(plaintext.data()), plaintext.length());
+        int ciphertext_len = len;
+        EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+        ciphertext_len += len;
+
+        // Get the tag
+        unsigned char tag[16];
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
+
+        EVP_CIPHER_CTX_free(ctx);
+
+        // Write the encrypted content to the file
+        std::ofstream file(logFile, std::ios::binary);
+        if (!file) return false;
+
+        // File structure: Magic Number (8 bytes) | Version (4 bytes) | Salt (16 bytes) | IV (12 bytes) | Encrypted Content | Tag (16 bytes)
+        const char* magic = "SECURLOG";
+        uint32_t version = 1;
+        file.write(magic, 8);
+        file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        file.write(reinterpret_cast<const char*>(salt), sizeof(salt));
+        file.write(reinterpret_cast<const char*>(iv), sizeof(iv));
+        file.write(reinterpret_cast<const char*>(ciphertext.data()), ciphertext_len);
+        file.write(reinterpret_cast<const char*>(tag), sizeof(tag));
+
+        return true;
+    }
+
+    bool readAndDecryptLog() {
+            std::ifstream file(logFile, std::ios::binary);
+            if (!file) {
+                // If the file doesn't exist, initialize with empty data
+                events.clear();
+                inCampus.clear();
+                currentRoom.clear();
+                validToken = token;
+                return true;
+            }
+
+            char magic[8];
+            uint32_t version;
+            file.read(magic, 8);
+            file.read(reinterpret_cast<char*>(&version), sizeof(version));
+            file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+            file.read(reinterpret_cast<char*>(iv), sizeof(iv));
+
+            // Read the rest of the file
+            std::vector<unsigned char> encrypted_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+            if (encrypted_content.size() < 16) {
+                // The file is too small to contain valid data
+                return false;
+            }
+
+            // The last 16 bytes are the tag
+            unsigned char tag[16];
+            std::copy(encrypted_content.end() - 16, encrypted_content.end(), tag);
+            encrypted_content.resize(encrypted_content.size() - 16);
+
+            // Set up the decryption context
+            EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+            EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv);
+
+            // Decrypt the content
+            std::vector<unsigned char> decrypted_content(encrypted_content.size());
+            int len;
+            EVP_DecryptUpdate(ctx, decrypted_content.data(), &len, encrypted_content.data(), encrypted_content.size());
+            int plaintext_len = len;
+
+            // Set the expected tag value
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tag);
+
+            // Finalize the decryption
+            int ret = EVP_DecryptFinal_ex(ctx, decrypted_content.data() + len, &len);
+            EVP_CIPHER_CTX_free(ctx);
+
+            if (ret > 0) {
+                plaintext_len += len;
+                decrypted_content.resize(plaintext_len);
+
+                // Parse the decrypted content
+                std::string decrypted_str(decrypted_content.begin(), decrypted_content.end());
+                std::istringstream iss(decrypted_str);
+                std::string line;
+                events.clear();
+                inCampus.clear();
+                currentRoom.clear();
+                while (std::getline(iss, line)) {
+                    Event event(0, "", "", false, false);
+                    std::istringstream line_iss(line);
+                    line_iss >> event.timestamp >> event.token >> event.name >> event.isEmployee >> event.isArrival >> event.roomId;
+                    if (events.empty()) {
+                        validToken = event.token;
+                    }
+                    events.push_back(event);
+                    updateState(event);
+                }
+                return true;
+            }
+            return false;
+        }
+    bool readLog() {
+        std::ifstream file(logFile);
+        if (!file) return true; // It's okay if the file doesn't exist yet
+
+        Event event(0, "", "", false, false);
+        while (file >> event.timestamp >> event.token >> event.name >> event.isEmployee >> event.isArrival >> event.roomId) {
+            if (events.empty()) validToken = event.token;
+            events.push_back(event);
+            updateState(event);
+        }
+        return true;
+    }
+
+    void updateState(const Event& event) {
+        std::string key = (event.isEmployee ? "E:" : "G:") + event.name;
+        if (event.isArrival) {
+            if (event.roomId == -1) {
+                inCampus[key] = true;
+            } else {
+                currentRoom[key] = event.roomId;
+            }
         } else {
-           
-            std::ofstream outfile(logFile.c_str(), std::ios::app);
-            outfile.close(); 
+            if (event.roomId == -1) {
+                inCampus[key] = false;
+                currentRoom.erase(key);
+            } else {
+                currentRoom.erase(key);
+            }
         }
     }
 
-    // Function to append an entry to the log
-    bool appendEntry(LogEntry entry) {
-        if (!validate(entry)) {
-            return false;
+    bool isValidName(const std::string& name) {
+        return !name.empty() && std::all_of(name.begin(), name.end(), [](char c) {
+            return std::isalpha(c);
+        });
+    }
+
+    bool isValidToken(const std::string& token) {
+        return !token.empty() && std::all_of(token.begin(), token.end(), [](char c) {
+            return std::isalnum(c);
+        });
+    }
+
+    public:
+        SecureLogManager(const std::string& file, const std::string& userToken) : logFile(file), token(userToken) {
+                // Initialize salt with zeros
+                std::memset(salt, 0, sizeof(salt));
+                std::memset(iv, 0, sizeof(iv));
+
+                // Derive the key
+                deriveKey();
+
+                // Try to read and decrypt the log file
+                if (!readAndDecryptLog()) {
+                    // If reading fails, initialize with empty data
+                    events.clear();
+                    inCampus.clear();
+                    currentRoom.clear();
+                    validToken = token;
+
+                    // Generate a new salt for future use
+                    RAND_bytes(salt, sizeof(salt));
+                }
+            }
+
+        bool appendEntry(const Event& event) {
+            if (!validateEntry(event)) return false;
+
+            events.push_back(event);
+            updateState(event);
+            return encryptAndWriteLog();
         }
 
-        std::ofstream outfile;
-        outfile.open(logFile.c_str(), std::ios::app);
-        if (!outfile) {
+        bool validateEntry(const Event& event) {
+            if (event.timestamp < 1 || event.timestamp > MAX_TIMESTAMP) return false;
+            if (!events.empty() && event.timestamp <= events.back().timestamp) return false;
+            if (!isValidToken(event.token)) return false;
+            if (!validToken.empty() && event.token != validToken) return false;
+            if (!isValidName(event.name)) return false;
+            if (event.roomId < -1 || event.roomId > MAX_ROOM_ID) return false;
+
+            std::string key = (event.isEmployee ? "E:" : "G:") + event.name;
+
+            if (event.isArrival) {
+                if (event.roomId == -1) {
+                    if (inCampus[key]) return false;
+                } else {
+                    if (!inCampus[key] || currentRoom.count(key) > 0) return false;
+                }
+            } else {
+                if (event.roomId == -1) {
+                    if (!inCampus[key]) return false;
+                } else {
+                    if (currentRoom[key] != event.roomId) return false;
+                }
+            }
+
+            return true;
+        }
+    };
+
+
+    bool processBatchFile(const std::string& batchFile) {
+        std::ifstream file(batchFile);
+        if (!file) {
             std::cout << "invalid" << std::endl;
             return false;
         }
 
-        outfile << entry.serialize();
-        outfile.close();
-        lastTimestamp = entry.getTimestamp(); // Update last timestamp
-        return true;
-    }
+        std::string line;
+        bool anySuccess = false;
+        std::string defaultToken = "defaultToken";  // You can change this to an appropriate default token
+        SecureLogManager manager("", defaultToken);  // Initialize with empty log file and token
 
-    // Function to validate entry before appending
-    bool validate(LogEntry &entry) {
-       
-        if (entry.getTimestamp() <= lastTimestamp) {
-            std::cout << "invalid" << std::endl;
-            return false;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            std::vector<std::string> args;
+            std::string arg;
+            while (iss >> arg) {
+                args.push_back(arg);
+            }
+
+            long timestamp = 0;
+            std::string token, name, logFile;
+            bool isEmployee = false, isArrival = false;
+            int roomId = -1;
+
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (args[i] == "-T") timestamp = std::stol(args[++i]);
+                else if (args[i] == "-K") token = args[++i];
+                else if (args[i] == "-E") { name = args[++i]; isEmployee = true; }
+                else if (args[i] == "-G") { name = args[++i]; isEmployee = false; }
+                else if (args[i] == "-A") isArrival = true;
+                else if (args[i] == "-L") isArrival = false;
+                else if (args[i] == "-R") roomId = std::stoi(args[++i]);
+                else logFile = args[i];
+            }
+
+            manager = SecureLogManager(logFile, token);  // Reset the manager with the current log file and token
+            Event event(timestamp, token, name, isEmployee, isArrival, roomId);
+            if (!manager.appendEntry(event)) {
+                std::cout << "invalid" << std::endl;
+            } else {
+                anySuccess = true;
+            }
         }
 
-        
-        if (!validToken.empty() && validToken != entry.getToken()) {
-            std::cout << "invalid" << std::endl;
-            return false;
-        }
-
-        
-
-        return true;
+        return anySuccess;
     }
-};
 
-// Main function to parse command line arguments and append to log
-int main(int argc, char *argv[]) {
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cout << "invalid" << std::endl;
+        return 255;
+    }
+
+    if (std::string(argv[1]) == "-B") {
+        if (argc != 3) {
+            std::cout << "invalid" << std::endl;
+            return 255;
+        }
+        return processBatchFile(argv[2]) ? 0 : 255;
+    }
+
     long timestamp = 0;
-    std::string token, name, role;
-    bool arrival = false;
-    int room = -1;
-    std::string logFile;
+    std::string token, name, logFile;
+    bool isEmployee = false, isArrival = false;
+    int roomId = -1;
 
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-T") == 0) {
-            timestamp = atol(argv[++i]);
-        } else if (strcmp(argv[i], "-K") == 0) {
-            token = argv[++i];
-        } else if (strcmp(argv[i], "-E") == 0) {
-            name = argv[++i];
-            role = "EMPLOYEE";
-        } else if (strcmp(argv[i], "-G") == 0) {
-            name = argv[++i];
-            role = "GUEST";
-        } else if (strcmp(argv[i], "-A") == 0) {
-            arrival = true;
-        } else if (strcmp(argv[i], "-L") == 0) {
-            arrival = false;
-        } else {
-            logFile = argv[i]; 
-        }
+        if (strcmp(argv[i], "-T") == 0) timestamp = std::stol(argv[++i]);
+        else if (strcmp(argv[i], "-K") == 0) token = argv[++i];
+        else if (strcmp(argv[i], "-E") == 0) { name = argv[++i]; isEmployee = true; }
+        else if (strcmp(argv[i], "-G") == 0) { name = argv[++i]; isEmployee = false; }
+        else if (strcmp(argv[i], "-A") == 0) isArrival = true;
+        else if (strcmp(argv[i], "-L") == 0) isArrival = false;
+        else if (strcmp(argv[i], "-R") == 0) roomId = std::stoi(argv[++i]);
+        else logFile = argv[i];
     }
 
-    // Check if logFile was provided
-    if (logFile.empty()) {
-        std::cerr << "Log file name is required." << std::endl;
-        return 1;
+    if (logFile.empty() || token.empty() || name.empty() || timestamp == 0) {
+        std::cout << "invalid" << std::endl;
+        return 255;
     }
 
-   
-    LogEntry entry(timestamp, token, name, role, arrival, room);
-    LogManager manager(logFile);
-    if (!manager.appendEntry(entry)) {
-        exit(255);
-    }
+    SecureLogManager manager(logFile, token);
+       Event event(timestamp, token, name, isEmployee, isArrival, roomId);
+       if (!manager.appendEntry(event)) {
+           std::cout << "invalid" << std::endl;
+           return 255;
+       }
 
     return 0;
-}
+} 
