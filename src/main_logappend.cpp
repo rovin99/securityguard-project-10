@@ -36,12 +36,19 @@ private:
     std::string validToken;
 
     // New members for encryption
-    unsigned char key[32];  // 256-bit key
+    unsigned char key[32] = { 0x93, 0xb, 0x5f, 0x24, 0x61, 0x7a, 0xf9, 0x48, 0x60, 0x96, 0x88, 0x12, 0xe, 0x57, 0x92, 0x73,
+                              0xe, 0xf5, 0x10, 0xa2, 0xe3, 0x23, 0x23, 0x7f, 0x2f, 0xdf, 0x18, 0x24, 0xab, 0x49, 0x73, 0xf8 };
+
     unsigned char salt[16];
     unsigned char iv[12];   // IV for AES-GCM
 
+    
     void deriveKey() {
-            PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, sizeof(salt), 100, EVP_sha256(), sizeof(key), key);
+    
+
+        PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 100, EVP_sha256(), 32, key);
+
+        
     }
 
     bool encryptAndWriteLog() {
@@ -52,30 +59,58 @@ private:
                          std::to_string(event.roomId) + "\n";
         }
 
+        std::cout << "Plaintext to encrypt: " << plaintext << std::endl;
+
         // Generate a new IV for each write
         RAND_bytes(iv, sizeof(iv));
 
+        
         // Set up the encryption context
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-        EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv);
+        if (!ctx) {
+            std::cerr << "Error: Unable to create cipher context" << std::endl;
+            return false;
+        }
+
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) != 1) {
+            std::cerr << "Error: Encryption initialization failed" << std::endl;
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
 
         // Encrypt the plaintext
         std::vector<unsigned char> ciphertext(plaintext.length() + EVP_MAX_BLOCK_LENGTH);
         int len;
-        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, reinterpret_cast<const unsigned char*>(plaintext.data()), plaintext.length());
+        if (EVP_EncryptUpdate(ctx, ciphertext.data(), &len, reinterpret_cast<const unsigned char*>(plaintext.data()), plaintext.length()) != 1) {
+            std::cerr << "Error: Encryption update failed" << std::endl;
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
         int ciphertext_len = len;
-        EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+
+        if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) {
+            std::cerr << "Error: Encryption finalization failed" << std::endl;
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
         ciphertext_len += len;
 
         // Get the tag
         unsigned char tag[16];
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) {
+            std::cerr << "Error: Unable to get GCM tag" << std::endl;
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
 
         EVP_CIPHER_CTX_free(ctx);
 
         // Write the encrypted content to the file
         std::ofstream file(logFile, std::ios::binary);
-        if (!file) return false;
+        if (!file) {
+            std::cerr << "Error: Unable to open file for writing" << std::endl;
+            return false;
+        }
 
         // File structure: Magic Number (8 bytes) | Version (4 bytes) | Salt (16 bytes) | IV (12 bytes) | Encrypted Content | Tag (16 bytes)
         const char* magic = "SECURLOG";
@@ -86,6 +121,26 @@ private:
         file.write(reinterpret_cast<const char*>(iv), sizeof(iv));
         file.write(reinterpret_cast<const char*>(ciphertext.data()), ciphertext_len);
         file.write(reinterpret_cast<const char*>(tag), sizeof(tag));
+        std::cout << "Magic number: " << std::string(magic, 8) << std::endl;
+        std::cout << "Version: " << version << std::endl;
+        std::cout << "Salt: ";
+        for (int i = 0; i < 16; i++) std::cout << std::hex << (int)salt[i] << " ";
+        std::cout << std::endl;
+        std::cout << "IV: ";
+        for (int i = 0; i < 12; i++) std::cout << std::hex << (int)iv[i] << " ";
+        std::cout << std::endl;
+        if (!file) {
+            std::cerr << "Error: Failed to write to file" << std::endl;
+            return false;
+        }
+        std::cout << "Encrypted data size: " << ciphertext_len << std::endl;
+        std::cout << "Tag: ";
+        for (int i = 0; i < 16; i++) std::cout << std::hex << (int)tag[i] << " ";
+        std::cout << std::endl;
+
+        file.close();
+
+        std::cout << "File written successfully. Size: " << (8 + 4 + 16 + 12 + ciphertext_len + 16) << " bytes" << std::endl;
 
         return true;
     }
@@ -208,25 +263,27 @@ private:
 
     public:
         SecureLogManager(const std::string& file, const std::string& userToken) : logFile(file), token(userToken) {
-                // Initialize salt with zeros
-                std::memset(salt, 0, sizeof(salt));
-                std::memset(iv, 0, sizeof(iv));
+            // Generate a random salt
+            std::memset(salt, 0, sizeof(salt));
+            std::memset(iv, 0, sizeof(iv));
+            
+            deriveKey();
+            std::cout << "Derived key: ";
+            for (int i = 0; i < 32; i++) std::cout << std::hex << (int)key[i] << " ";
+            std::cout << std::endl;
+            if (!readAndDecryptLog()) {
+                        // If reading fails, initialize with empty data
+                        events.clear();
+                        inCampus.clear();
+                        currentRoom.clear();
+                        validToken = token;
 
-                // Derive the key
-                deriveKey();
-
-                // Try to read and decrypt the log file
-                if (!readAndDecryptLog()) {
-                    // If reading fails, initialize with empty data
-                    events.clear();
-                    inCampus.clear();
-                    currentRoom.clear();
-                    validToken = token;
-
-                    // Generate a new salt for future use
-                    RAND_bytes(salt, sizeof(salt));
-                }
+                        // Generate a new salt for future use
+                        RAND_bytes(salt, sizeof(salt));
             }
+            
+
+        }
 
         bool appendEntry(const Event& event) {
             if (!validateEntry(event)) return false;
