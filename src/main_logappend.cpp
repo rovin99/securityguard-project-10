@@ -36,20 +36,20 @@ private:
     std::string validToken;
 
     // New members for encryption
-    unsigned char key[32] = { 0x93, 0xb, 0x5f, 0x24, 0x61, 0x7a, 0xf9, 0x48, 0x60, 0x96, 0x88, 0x12, 0xe, 0x57, 0x92, 0x73,
-                              0xe, 0xf5, 0x10, 0xa2, 0xe3, 0x23, 0x23, 0x7f, 0x2f, 0xdf, 0x18, 0x24, 0xab, 0x49, 0x73, 0xf8 };
+    unsigned char key[32];
 
     unsigned char salt[16];
     unsigned char iv[12];   // IV for AES-GCM
 
     
-    void deriveKey() {
-    
+   void deriveKey() {
+       
+       
 
-        PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 100, EVP_sha256(), 32, key);
+       PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 200000, EVP_sha256(), 32, key);
 
-        
-    }
+     
+   }
 
     bool encryptAndWriteLog() {
         std::string plaintext;
@@ -59,7 +59,7 @@ private:
                          std::to_string(event.roomId) + "\n";
         }
 
-        std::cout << "Plaintext to encrypt: " << plaintext << std::endl;
+        
 
         // Generate a new IV for each write
         RAND_bytes(iv, sizeof(iv));
@@ -106,37 +106,30 @@ private:
         EVP_CIPHER_CTX_free(ctx);
 
         // Write the encrypted content to the file
-        std::ofstream file(logFile, std::ios::binary);
-        if (!file) {
-            std::cerr << "Error: Unable to open file for writing" << std::endl;
-            return false;
-        }
+        std::fstream file(logFile, std::ios::in | std::ios::out | std::ios::binary);
+            if (!file) {
+                std::cerr << "Error: Unable to open file for writing" << std::endl;
+                return false;
+            }
+
+            // Skip the salt as it's already written
+            file.seekp(sizeof(salt), std::ios::beg);
 
         // File structure: Magic Number (8 bytes) | Version (4 bytes) | Salt (16 bytes) | IV (12 bytes) | Encrypted Content | Tag (16 bytes)
         const char* magic = "SECURLOG";
         uint32_t version = 1;
         file.write(magic, 8);
         file.write(reinterpret_cast<const char*>(&version), sizeof(version));
-        file.write(reinterpret_cast<const char*>(salt), sizeof(salt));
+        
         file.write(reinterpret_cast<const char*>(iv), sizeof(iv));
         file.write(reinterpret_cast<const char*>(ciphertext.data()), ciphertext_len);
         file.write(reinterpret_cast<const char*>(tag), sizeof(tag));
-        std::cout << "Magic number: " << std::string(magic, 8) << std::endl;
-        std::cout << "Version: " << version << std::endl;
-        std::cout << "Salt: ";
-        for (int i = 0; i < 16; i++) std::cout << std::hex << (int)salt[i] << " ";
-        std::cout << std::endl;
-        std::cout << "IV: ";
-        for (int i = 0; i < 12; i++) std::cout << std::hex << (int)iv[i] << " ";
-        std::cout << std::endl;
+        
         if (!file) {
             std::cerr << "Error: Failed to write to file" << std::endl;
             return false;
         }
-        std::cout << "Encrypted data size: " << ciphertext_len << std::endl;
-        std::cout << "Tag: ";
-        for (int i = 0; i < 16; i++) std::cout << std::hex << (int)tag[i] << " ";
-        std::cout << std::endl;
+        
 
         file.close();
 
@@ -156,11 +149,25 @@ private:
                 return true;
             }
 
+            // Read the salt first
+                file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+                
+                // Print the salt for debugging
+                std::cout << "Read salt: ";
+                for (int i = 0; i < sizeof(salt); i++) {
+                    printf("%02x ", salt[i]);
+                }
+                std::cout << std::endl;
+
+                // Now derive the key using this salt
+                deriveKey();
+
+
             char magic[8];
             uint32_t version;
             file.read(magic, 8);
             file.read(reinterpret_cast<char*>(&version), sizeof(version));
-            file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+            
             file.read(reinterpret_cast<char*>(iv), sizeof(iv));
 
             // Read the rest of the file
@@ -264,10 +271,38 @@ private:
     public:
         SecureLogManager(const std::string& file, const std::string& userToken) : logFile(file), token(userToken) {
             // Generate a random salt
-            std::memset(salt, 0, sizeof(salt));
-            std::memset(iv, 0, sizeof(iv));
-            
-            deriveKey();
+            std::ifstream existingFile(logFile, std::ios::binary);
+                if (existingFile) {
+                    // File exists, read the salt
+                    existingFile.read(reinterpret_cast<char*>(salt), sizeof(salt));
+                    existingFile.close();
+                    std::cout << "Existing file, read salt: ";
+                } else {
+                    // New file, generate a new salt
+                    RAND_bytes(salt, sizeof(salt));
+                    std::cout << "New file, generated salt: ";
+                }
+                
+                // Print the salt for debugging
+                for (int i = 0; i < sizeof(salt); i++) {
+                    printf("%02x ", salt[i]);
+                }
+                std::cout << std::endl;
+
+                std::memset(iv, 0, sizeof(iv));
+                std::cout << "Token: " << userToken << std::endl;
+                deriveKey();
+                
+                if (!existingFile) {
+                    // For a new file, we need to write the salt immediately
+                    std::ofstream newFile(logFile, std::ios::binary);
+                    if (newFile) {
+                        newFile.write(reinterpret_cast<const char*>(salt), sizeof(salt));
+                        newFile.close();
+                    } else {
+                        std::cerr << "Error: Unable to create new log file" << std::endl;
+                    }
+                }
             std::cout << "Derived key: ";
             for (int i = 0; i < 32; i++) std::cout << std::hex << (int)key[i] << " ";
             std::cout << std::endl;
@@ -414,4 +449,4 @@ int main(int argc, char* argv[]) {
        }
 
     return 0;
-} 
+}

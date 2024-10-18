@@ -34,9 +34,8 @@ private:
     std::map<std::string, std::vector<int>> roomHistory;
     std::map<std::string, long> totalTime;
     std::map<std::string, long> lastEntry;
-    // Instead of deriving the key, use a static key for testing
-    unsigned char key[32] = { 0x93, 0xb, 0x5f, 0x24, 0x61, 0x7a, 0xf9, 0x48, 0x60, 0x96, 0x88, 0x12, 0xe, 0x57, 0x92, 0x73,
-                              0xe, 0xf5, 0x10, 0xa2, 0xe3, 0x23, 0x23, 0x7f, 0x2f, 0xdf, 0x18, 0x24, 0xab, 0x49, 0x73, 0xf8 };
+    
+    unsigned char key[32];
 
 
         unsigned char salt[16];
@@ -45,8 +44,8 @@ private:
         
 void deriveKey() {
     
-
-    PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 100, EVP_sha256(), 32, key);
+    
+    PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 200000, EVP_sha256(), 32, key);
 
   
 }
@@ -56,12 +55,23 @@ void deriveKey() {
                 std::cerr << "Error: Unable to open file" << std::endl;
                 return false;
             }
+            // Read the salt first
+                file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+                
+                // Print the salt for debugging
+                std::cout << "Read salt: ";
+                for (int i = 0; i < sizeof(salt); i++) {
+                    printf("%02x ", salt[i]);
+                }
+                std::cout << std::endl;
 
+                // Now derive the key using this salt
+                deriveKey();
             char magic[8];
             uint32_t version;
             file.read(magic, 8);
             file.read(reinterpret_cast<char*>(&version), sizeof(version));
-            file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+            
             file.read(reinterpret_cast<char*>(iv), sizeof(iv));
 
             if (!file) {
@@ -300,7 +310,8 @@ void deriveKey() {
 
 public:
     LogReader(const std::string& file, const std::string& tok) : logFile(file), token(tok) {
-            deriveKey();
+            std::cout<<"Token"<<tok<<std::endl;
+            
             if (!readAndDecryptLog()) {
                 std::cout << "invalid" << std::endl;
                 exit(255);
