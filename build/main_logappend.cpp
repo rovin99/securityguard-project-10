@@ -15,6 +15,8 @@
 const int MAX_TIMESTAMP = 1073741823;
 const int MAX_ROOM_ID = 1073741823;
 
+// Structure to represent an event in the log
+
 struct Event {
     long timestamp;
     std::string token;
@@ -41,16 +43,13 @@ private:
     unsigned char salt[16];
     unsigned char iv[12];   // IV for AES-GCM
 
-    
+    // Derives the encryption key from the token and salt
    void deriveKey() {
        
-       
-
        PKCS5_PBKDF2_HMAC(token.c_str(), token.length(), salt, 16, 200000, EVP_sha256(), 32, key);
-
      
    }
-
+    // Encrypts the log entries and writes them to the file
     bool encryptAndWriteLog() {
         std::string plaintext;
         for (const auto& event : events) {
@@ -133,11 +132,11 @@ private:
 
         file.close();
 
-        std::cout << "File written successfully. Size: " << (8 + 4 + 16 + 12 + ciphertext_len + 16) << " bytes" << std::endl;
+        
 
         return true;
     }
-
+    // Reads and decrypts the log file
     bool readAndDecryptLog() {
             std::ifstream file(logFile, std::ios::binary);
             if (!file) {
@@ -150,17 +149,10 @@ private:
             }
 
             // Read the salt first
-                file.read(reinterpret_cast<char*>(salt), sizeof(salt));
-                
-                // Print the salt for debugging
-                std::cout << "Read salt: ";
-                for (int i = 0; i < sizeof(salt); i++) {
-                    printf("%02x ", salt[i]);
-                }
-                std::cout << std::endl;
+            file.read(reinterpret_cast<char*>(salt), sizeof(salt));
 
-                // Now derive the key using this salt
-                deriveKey();
+            // Now derive the key using this salt
+            deriveKey();
 
 
             char magic[8];
@@ -237,7 +229,7 @@ private:
         }
         return true;
     }
-
+    // Updates the internal state based on an event
     void updateState(const Event& event) {
         std::string key = (event.isEmployee ? "E:" : "G:") + event.name;
         if (event.isArrival) {
@@ -255,12 +247,14 @@ private:
             }
         }
     }
-
+    // Validates if a name contains only alphabetic characters
     bool isValidName(const std::string& name) {
         return !name.empty() && std::all_of(name.begin(), name.end(), [](char c) {
             return std::isalpha(c);
         });
     }
+
+    // Validates if a token contains only alphanumeric characters
 
     bool isValidToken(const std::string& token) {
         return !token.empty() && std::all_of(token.begin(), token.end(), [](char c) {
@@ -269,6 +263,7 @@ private:
     }
 
     public:
+        // Constructor: Initializes the SecureLogManager with a log file and token
         SecureLogManager(const std::string& file, const std::string& userToken) : logFile(file), token(userToken) {
             // Generate a random salt
             std::ifstream existingFile(logFile, std::ios::binary);
@@ -276,21 +271,17 @@ private:
                     // File exists, read the salt
                     existingFile.read(reinterpret_cast<char*>(salt), sizeof(salt));
                     existingFile.close();
-                    std::cout << "Existing file, read salt: ";
+                    
                 } else {
                     // New file, generate a new salt
                     RAND_bytes(salt, sizeof(salt));
-                    std::cout << "New file, generated salt: ";
+                   
                 }
                 
-                // Print the salt for debugging
-                for (int i = 0; i < sizeof(salt); i++) {
-                    printf("%02x ", salt[i]);
-                }
-                std::cout << std::endl;
+                
 
                 std::memset(iv, 0, sizeof(iv));
-                std::cout << "Token: " << userToken << std::endl;
+                
                 deriveKey();
                 
                 if (!existingFile) {
@@ -299,13 +290,9 @@ private:
                     if (newFile) {
                         newFile.write(reinterpret_cast<const char*>(salt), sizeof(salt));
                         newFile.close();
-                    } else {
-                        std::cerr << "Error: Unable to create new log file" << std::endl;
-                    }
+                    } 
                 }
-            std::cout << "Derived key: ";
-            for (int i = 0; i < 32; i++) std::cout << std::hex << (int)key[i] << " ";
-            std::cout << std::endl;
+            
             if (!readAndDecryptLog()) {
                         // If reading fails, initialize with empty data
                         events.clear();
@@ -319,6 +306,7 @@ private:
             
 
         }
+        // Appends a new entry to the log
 
         bool appendEntry(const Event& event) {
             if (!validateEntry(event)) return false;
@@ -327,6 +315,8 @@ private:
             updateState(event);
             return encryptAndWriteLog();
         }
+
+        // Validates an entry before appending it to the log
 
         bool validateEntry(const Event& event) {
             if (event.timestamp < 1 || event.timestamp > MAX_TIMESTAMP) return false;
@@ -356,7 +346,7 @@ private:
         }
     };
 
-
+    // Processes a batch file containing multiple log entries
     bool processBatchFile(const std::string& batchFile) {
         std::ifstream file(batchFile);
         if (!file) {
@@ -366,7 +356,7 @@ private:
 
         std::string line;
         bool anySuccess = false;
-        std::string defaultToken = "defaultToken";  // You can change this to an appropriate default token
+        std::string defaultToken = "defaultToken";  
         SecureLogManager manager("", defaultToken);  // Initialize with empty log file and token
 
         while (std::getline(file, line)) {
@@ -405,7 +395,7 @@ private:
         return anySuccess;
     }
 
-
+// Main function: Handles command-line arguments and executes the appropriate action
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "invalid" << std::endl;

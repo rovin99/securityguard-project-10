@@ -11,7 +11,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
-
+// Structure to represent an event in the log
 struct Event {
     long timestamp;
     std::string token;
@@ -19,10 +19,12 @@ struct Event {
     bool isEmployee;
     bool isArrival;
     int roomId;
-
+    // Constructor for Event
     Event(long t, const std::string& tok, const std::string& n, bool emp, bool arr, int room = -1)
         : timestamp(t), token(tok), name(n), isEmployee(emp), isArrival(arr), roomId(room) {}
 };
+
+// Main class for reading and processing the log
 
 class LogReader {
 private:
@@ -36,12 +38,20 @@ private:
     std::map<std::string, long> lastEntry;
     
     unsigned char key[32];
+    unsigned char salt[16];
+    unsigned char iv[12];   // IV for AES-GCM
 
-
-        unsigned char salt[16];
-        unsigned char iv[12];   // IV for AES-GCM
-
-        
+    // Structure to represent a time range
+    struct TimeRange {
+    long start;
+    long end;
+    TimeRange(long s, long e) : start(s), end(e) {}
+};
+// Structure to represent room occupancy
+struct RoomOccupancy {
+    std::map<std::string, std::vector<TimeRange>> occupants;
+};
+// Derive the encryption key from the token
 void deriveKey() {
     
     
@@ -49,24 +59,20 @@ void deriveKey() {
 
   
 }
+        // Read and decrypt the log file
         bool readAndDecryptLog() {
             std::ifstream file(logFile, std::ios::binary);
             if (!file) {
                 std::cerr << "Error: Unable to open file" << std::endl;
                 return false;
             }
-            // Read the salt first
-                file.read(reinterpret_cast<char*>(salt), sizeof(salt));
-                
-                // Print the salt for debugging
-                std::cout << "Read salt: ";
-                for (int i = 0; i < sizeof(salt); i++) {
-                    printf("%02x ", salt[i]);
-                }
-                std::cout << std::endl;
+            // Read the salt and derive the key
+            file.read(reinterpret_cast<char*>(salt), sizeof(salt));
+            
+        
+            deriveKey();
 
-                // Now derive the key using this salt
-                deriveKey();
+            // Read and verify the file header
             char magic[8];
             uint32_t version;
             file.read(magic, 8);
@@ -85,19 +91,12 @@ void deriveKey() {
                 return false;
             }
 
-            std::cout << "Magic number: " << std::string(magic, 8) << std::endl;
-            std::cout << "Version: " << version << std::endl;
-            std::cout << "Salt: ";
-            for (int i = 0; i < 16; i++) std::cout << std::hex << (int)salt[i] << " ";
-            std::cout << std::endl;
-            std::cout << "IV: ";
-            for (int i = 0; i < 12; i++) std::cout << std::hex << (int)iv[i] << " ";
-            std::cout << std::endl;
+            
 
-            // Read the rest of the file
+            // Read the encrypted content
             std::vector<unsigned char> encrypted_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-            std::cout << "Encrypted content size: " << encrypted_content.size() << std::endl;
+           
 
 
 
@@ -106,27 +105,19 @@ void deriveKey() {
                 return false;
             }
 
-            // The last 16 bytes are the tag
+            // Extract the authentication tag
             unsigned char tag[16];
             std::copy(encrypted_content.end() - 16, encrypted_content.end(), tag);
             encrypted_content.resize(encrypted_content.size() - 16);
 
-            std::cout << "Tag: ";
-            for (int i = 0; i < 16; i++) std::cout << std::hex << (int)tag[i] << " ";
-            std::cout << std::endl;
-
-           
-            std::cout << "Derived key: ";
-            for (int i = 0; i < 32; i++) std::cout << std::hex << (int)key[i] << " ";
-            std::cout << std::endl;
-
+            
             // Set up the decryption context
             EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
             if (!ctx) {
                 std::cerr << "Error: Unable to create cipher context" << std::endl;
                 return false;
             }
-
+            // Initialize the decryption
             if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) != 1) {
                 std::cerr << "Error: Decryption initialization failed" << std::endl;
                 EVP_CIPHER_CTX_free(ctx);
@@ -163,7 +154,7 @@ void deriveKey() {
 
             EVP_CIPHER_CTX_free(ctx);
 
-            std::cout << "Decrypted content: " << std::string(decrypted_content.begin(), decrypted_content.end()) << std::endl;
+            
 
             // Parse the decrypted content
             std::string decrypted_str(decrypted_content.begin(), decrypted_content.end());
@@ -197,7 +188,7 @@ void deriveKey() {
         }
         return true;
     }
-
+    // Update the state based on an event
     void updateState(const Event& event) {
         std::string key = (event.isEmployee ? "E:" : "G:") + event.name;
         if (event.isArrival) {
@@ -218,7 +209,19 @@ void deriveKey() {
             }
         }
     }
+    // Check if a name exists in the log
+    bool nameExists(const std::string& name, bool isEmployee) const {
+        std::string key = (isEmployee ? "E:" : "G:") + name;
+        return inCampus.find(key) != inCampus.end() || totalTime.find(key) != totalTime.end();
+    }
 
+    // Helper function to sort a set of strings
+    std::vector<std::string> sortedNames(const std::set<std::string>& names) const {
+        std::vector<std::string> sorted(names.begin(), names.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    }
+    // Print the current state of the campus
     void printCurrentState() {
         std::set<std::string> employees, guests;
         std::map<int, std::set<std::string>> rooms;
@@ -237,22 +240,32 @@ void deriveKey() {
             rooms[pair.second].insert(pair.first.substr(2));
         }
 
-        std::cout << join(employees, ",") << std::endl;
-        std::cout << join(guests, ",") << std::endl;
+        std::cout << join(sortedNames(employees), ",") << std::endl;
+        std::cout << join(sortedNames(guests), ",") << std::endl;
 
         for (const auto& room : rooms) {
-            std::cout << room.first << ": " << join(room.second, ",") << std::endl;
+            std::cout << room.first << ": " << join(sortedNames(room.second), ",") << std::endl;
         }
     }
-
+    // Print the room history for a specific person
     void printRoomHistory(const std::string& name, bool isEmployee) {
+        if (!nameExists(name, isEmployee)) {
+            return; // Print nothing if the name doesn't exist
+        }
+
         std::string key = (isEmployee ? "E:" : "G:") + name;
         if (roomHistory.count(key) > 0) {
-            std::cout << join(roomHistory[key], ",") << std::endl;
+            std::vector<int> sortedRooms = roomHistory[key];
+            std::sort(sortedRooms.begin(), sortedRooms.end());
+            std::cout << join(sortedRooms, ",") << std::endl;
         }
     }
-
+    // Print the total time spent on campus for a specific person
     void printTotalTime(const std::string& name, bool isEmployee) {
+        if (!nameExists(name, isEmployee)) {
+            return; // Print nothing if the name doesn't exist
+        }
+
         std::string key = (isEmployee ? "E:" : "G:") + name;
         long time = totalTime[key];
         if (inCampus[key]) {
@@ -263,38 +276,88 @@ void deriveKey() {
         }
     }
 
+    // Print the rooms where all specified people were present at the same time
     void printIntersection(const std::vector<std::string>& names) {
-        std::map<int, std::set<long>> roomOccupancy;
+        std::vector<std::string> existingNames;
+        for (const auto& name : names) {
+            if (nameExists(name.substr(2), name[0] == 'E')) {
+                existingNames.push_back(name);
+            }
+        }
+
+        if (existingNames.empty()) {
+            return; // Print nothing if no specified names exist
+        }
+
+        std::map<int, RoomOccupancy> roomOccupancies;
+
+        // Build room occupancy data
         for (const auto& event : events) {
             std::string key = (event.isEmployee ? "E:" : "G:") + event.name;
             if (event.roomId != -1) {
+                auto& occupancy = roomOccupancies[event.roomId].occupants[key];
                 if (event.isArrival) {
-                    roomOccupancy[event.roomId].insert(event.timestamp);
-                } else {
-                    roomOccupancy[event.roomId].erase(event.timestamp);
+                    occupancy.push_back(TimeRange(event.timestamp, LONG_MAX));
+                } else if (!occupancy.empty()) {
+                    occupancy.back().end = event.timestamp;
                 }
             }
         }
 
         std::set<int> commonRooms;
-        for (const auto& room : roomOccupancy) {
+        for (const auto& room : roomOccupancies) {
             bool allPresent = true;
             for (const auto& name : names) {
-                if (roomHistory[name].end() == std::find(roomHistory[name].begin(), roomHistory[name].end(), room.first)) {
+                if (room.second.occupants.find(name) == room.second.occupants.end()) {
                     allPresent = false;
                     break;
                 }
             }
             if (allPresent) {
-                commonRooms.insert(room.first);
+                std::vector<TimeRange> intersectionRanges;
+                if (room.second.occupants.find(names[0]) != room.second.occupants.end()) {
+                    intersectionRanges = room.second.occupants.at(names[0]);
+                }
+                for (size_t i = 1; i < names.size(); ++i) {
+                    std::vector<TimeRange> newIntersection;
+                    if (room.second.occupants.find(names[i]) != room.second.occupants.end()) {
+                        const auto& occupantRanges = room.second.occupants.at(names[i]);
+                        size_t j = 0, k = 0;
+                        while (j < intersectionRanges.size() && k < occupantRanges.size()) {
+                            long start = std::max(intersectionRanges[j].start, occupantRanges[k].start);
+                            long end = std::min(intersectionRanges[j].end, occupantRanges[k].end);
+                            if (start < end) {
+                                newIntersection.push_back(TimeRange(start, end));
+                            }
+                            if (intersectionRanges[j].end < occupantRanges[k].end) {
+                                ++j;
+                            } else {
+                                ++k;
+                            }
+                        }
+                        intersectionRanges = newIntersection;
+                        if (intersectionRanges.empty()) {
+                            allPresent = false;
+                            break;
+                        }
+                    } else {
+                        allPresent = false;
+                        break;
+                    }
+                }
+                if (allPresent && !intersectionRanges.empty()) {
+                    commonRooms.insert(room.first);
+                }
             }
         }
 
         if (!commonRooms.empty()) {
-            std::cout << join(std::vector<int>(commonRooms.begin(), commonRooms.end()), ",") << std::endl;
+            std::vector<int> sortedRooms(commonRooms.begin(), commonRooms.end());
+            std::sort(sortedRooms.begin(), sortedRooms.end());
+            std::cout << join(sortedRooms, ",") << std::endl;
         }
     }
-
+    // Helper function to join elements of a container into a string
     template<typename T>
     std::string join(const T& elements, const std::string& delimiter) {
         std::ostringstream os;
@@ -309,20 +372,23 @@ void deriveKey() {
     }
 
 public:
+    // Constructor
     LogReader(const std::string& file, const std::string& tok) : logFile(file), token(tok) {
-            std::cout<<"Token"<<tok<<std::endl;
+            
             
             if (!readAndDecryptLog()) {
                 std::cout << "invalid" << std::endl;
                 exit(255);
             }
         }
+
+    // Process the command-line arguments and execute the appropriate query
     void processCommand(int argc, char* argv[]) {
         bool stateQuery = false, roomQuery = false, timeQuery = false, intersectionQuery = false;
         std::string queryName;
         bool queryIsEmployee = false;
         std::vector<std::string> intersectionNames;
-
+        // Parse command-line arguments
         for (int i = 1; i < argc; ++i) {
             if (strcmp(argv[i], "-S") == 0) stateQuery = true;
             else if (strcmp(argv[i], "-R") == 0) roomQuery = true;
@@ -351,7 +417,8 @@ public:
         else if (timeQuery) printTotalTime(queryName, queryIsEmployee);
         else if (intersectionQuery) {
             if (intersectionNames.empty()) {
-                std::cout << "unimplemented" << std::endl;
+                std::cout << "invalid" << std::endl;
+                exit(255);
             } else {
                 printIntersection(intersectionNames);
             }
@@ -362,7 +429,7 @@ public:
         }
     }
 };
-
+// Main function: Handles command-line arguments and executes the appropriate action
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         std::cout << "invalid" << std::endl;
